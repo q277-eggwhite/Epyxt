@@ -1,0 +1,157 @@
+EPyXT: X-ray Processing Pipeline for Thermodynamic Mapping
+  version 1.0.9
+------------------------------------------------------------------------------
+
+Copyright [Your Name or Laboratory] (2023-202X)
+
+ This software is licensed under the MIT License
+ See the file included as LICENSE for details
+
+Source code and bug reports:
+ https://github.com/[Your Username]/EPyXT
+
+Changelog:
+ 1.0.9: Optimized directory structure; clarified runtime environment 
+        requirements and data standards for each pipeline stage.
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+Environment Dependencies and Compilation
+----------------------------------------
+
+This pipeline relies on two core astronomical software stacks: CIAO 
+(primarily for spatial data analysis) and HEASOFT (for spectral fitting).
+
+Contbin Compilation Workflow (Must be performed in the CIAO environment):
+1. Clone the official 'contbin' source code. 
+   You can clone it either parallel to (recommended) or inside the project root directory:
+   git clone https://github.com/jeremysanders/contbin.git
+
+2. Navigate to the scripts directory and run the compilation script:
+   cd scripts/
+   chmod +x build_contbin.sh
+   ./build_contbin.sh
+   
+   *(Note: The script is smart enough to auto-detect the 'contbin' directory 
+     in both parallel and internal locations and compile it seamlessly.)*
+
+3. [IMPORTANT] Restart the Conda environment to refresh path hooks:
+   conda deactivate && conda activate ciao-fxt
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+Pipeline Runtime Environment Requirements
+-----------------------------------------
+
+Due to the overlapping environment configurations and potential conflicts 
+between CIAO and HEASOFT (e.g., system library paths and alias overrides), 
+please strictly follow these requirements when executing scripts:
+
+1. Spatial Binning (pipe1_ciao.py) & Scientific Plotting (pipe3_plot.py):
+   Must be run within the CIAO environment.
+
+2. Spectral Extraction & Fitting (pipe2_fxt.py):
+   Must be run within the HEASOFT environment.
+
+Please manually switch to the appropriate environment before running each 
+script to ensure correct toolchain invocation.
+
+
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+Data Preparation (data/ directory)
+----------------------------------
+
+Before running the pipeline, ensure the data/ directory contains the 
+necessary files. Below is a standard directory structure:
+
+data/
+├── 11900004574/                           # ObsID 1 data directory
+│   ├── bkg_a.pha                          # Background spectrum for Telescope A
+│   ├── bkg_b.pha                          # Background spectrum for Telescope B
+│   ├── fxt_a_11900004574_...-without_vign.expo  # Exposure map for Telescope A (vignetting-corrected)
+│   ├── fxt_a_11900004574_..._cl_3ac.fits  # Event file for Telescope A
+│   ├── fxt_b_11900004574_...-without_vign.expo  # Exposure map for Telescope B (vignetting-corrected)
+│   └── fxt_b_11900004574_..._cl_3ac.fits  # Event file for Telescope B
+├── 11900296704/                           # ObsID 2 data directory
+│   ├── bkg_a.pha
+│   ├── bkg_b.pha
+│   ├── ..._6ca-without_vign.expo
+│   ├── ..._cl_6ca.fits
+│   ├── ..._6da-without_vign.expo
+│   └── ..._cl_6da.fits
+├── 11900312064/                           # ObsID 3 data directory and so on
+│   └── ...
+├── 11904194533/
+│   └── ...
+├── 11904195707/
+│   └── ...
+├── 11904195719/
+│   └── ...
+├── fxt_total_counts.fits                  # Globally merged counts image (used for large FOV spatial binning)
+└── pts.reg                                # Global point source exclusion region file (common to all ObsIDs)
+
+The core logic of the automatic observation loading function revolves around dynamically scanning and sorting data
+based on your directory structure. It begins by iterating through the contents of the designated data directory, using 
+a regular expression to strictly match 11-digit numeric subdirectories, which correspond directly to your distinct Observation
+IDs (ObsIDs). For each valid ObsID directory discovered, the script initializes an observation dictionary and maps the 
+absolute paths for the fixed background spectra files, namely `bkg_a.pha` and `bkg_b.pha`. It then performs an intelligent
+fuzzy sorting mechanism by scanning the rest of the subdirectory's files to accurately pair the respective telescope data 
+streams. Files containing the string "*a*" with a `.fits` extension are linked as the Telescope A event file, while those 
+containing "*b*" and `.fits` are assigned to Telescope B. In the same manner, exposure maps ending in `.expo` are distinguished 
+and mapped into their respective Telescope A and B variables using the "*a*" and "*b*" identifiers. Finally, the function validates
+that all six required file paths are successfully located and populated for a given ObsID before appending the dictionary to the
+global observation list, ensuring absolute data integrity and completeness before any heavy extraction or fitting tasks can begin.
+Auto-Loading Logic
+-----------------
+
+  data/{ObsID}/ ─────────────────────────────────────────┐
+       │                                                 │
+       ├─ bkg_a.pha  ──────────────────────┐             │
+       │  (fixed name)                     │ obs_dict    │
+       ├─ bkg_b.pha  ──────────────────────┤             │
+       │  (fixed name)                     │             │
+       ├─ *a*.fits ──────────────────┐    │             │
+       │  (evt file, telescope A)     ├────┼─► evt_a    │
+       ├─ *b*.fits ──────────────────┤    │             │
+       │  (evt file, telescope B)     ├────┼─► evt_b    │
+       ├─ *a*.expo ──────────────────┤    │             │
+       │  (exposure, telescope A)     ├────┼─► exp_a    │
+       └─ *b*.expo ──────────────────┤    │             │
+            (exposure, telescope B)  ├────┼─► exp_b    │
+                                     │    │             │
+                                     └────┴────────────► obs_list[]
+
+  Regex: ^\d{11}$  (11-digit ObsID folder)
+  Validation: All 6 keys required before appendings
+-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+Configuration (config.json) Reference
+-------------------------------------
+
+[base Module]
+- center_ra/dec : Target observational coordinates (degrees)
+- radius_arcmin : Analysis radius (pixels outside are masked)
+- base_image    : Filename of the base counts FITS image (located in data/)
+
+[step1 Module]
+- method        : Binning algorithm ("contbin" | "wvt" | "acb")
+- region_file   : DS9 region file for point source exclusion
+- target_sn     : Target S/N ratio; the system merges pixels until reached
+- max_radius    : ACB algorithm constraint; prevents overly large circular bins
+
+[step2 Module]
+- downsample    : ACB algorithm step size. Higher values increase speed but 
+                  decrease resolution/detail; lower values increase 
+                  precision but require more computation time.
+- evt_a/b       : Event files for Telescope A/B
+- bkg_file_a/b  : Background PHA spectra for Telescope A/B
+- exp_file_a/b  : Exposure maps for Telescope A/B
+
+[step4_fit Module]
+- nh            : Galactic hydrogen column density (10^22 cm^-2); usually frozen
+- kt            : Initial plasma temperature guess (keV)
+- abund         : Metal abundance (Solar); usually fixed at 0.3
+- redshift      : Cosmological redshift of the target
+- norm          : Initial APEC model normalization
+- energy_range  : Fitting energy band [min, max] (keV); used to filter low-energy noise
