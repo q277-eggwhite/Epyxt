@@ -128,22 +128,37 @@ def process_single_fitting(task_data):
     fit_success = False
     log_file = os.path.abspath(f"result/04_fitting/{method}_fit_result_{region_id}.log")
     xcm_file = os.path.abspath(f"result/04_fitting/{method}_fit_{region_id}.xcm")
+    chain_file = os.path.abspath(f"result/04_fitting/{method}_chain_{region_id}.fits")
     plot_base = os.path.abspath(f"result/05_fit_plots/{method}_plot_{region_id}.png")  
     
     if len(pi_files) > 0:
         fit = cfg["step4_fit"]
         emin, emax = fit.get("energy_range", [0.7, 8.0])
+        fit_method = fit.get("fit_method", "lm").lower()
         
         data_cmds = [f"data {idx}:{idx} {pure_path}" for idx, pure_path in enumerate(pi_files, 1)]
         data_inputs_str = "\n".join(data_cmds)
 
-        xcm_content = (
-            f"query yes\n{data_inputs_str}\nign bad\nign **-{emin}\nign {emax}-**\n"
-            f"statistic cstat\nmodel tbabs*apec\n"
-            f"{fit['nh']} -1\n{fit['kt']} 1 0.1 0.1 0.1 20 20\n{fit['abund']} -1\n{fit['redshift']} -1\n{fit['norm']} 1 0 0 0 1e10 1e10\n"
-            f"/*\nrenorm\nchatter 10\nfit 100\nlog {log_file}\nerror 2 5\nlog none\n"
-            f"cpd {plot_base}/png\nsetplot energy\nplot ldata res\nexit\n"
-        )
+        if fit_method == "mcmc":
+            # MCMC 模式：先 LM 拟合找初始点，再用 chain 命令采样
+            xcm_content = (
+                f"query yes\n{data_inputs_str}\nign bad\nign **-{emin}\nign {emax}-**\n"
+                f"statistic cstat\nmodel tbabs*apec\n"
+                f"{fit['nh']} -1\n{fit['kt']} 1 0.1 0.1 0.1 20 20\n{fit['abund']} -1\n{fit['redshift']} -1\n{fit['norm']} 1 0 0 0 1e10 1e10\n"
+                f"/*\nrenorm\nchatter 10\nfit 100\n"
+                f"chain burn 1000\nchain length 50000\nchain run {chain_file}\n"
+                f"log {log_file}\nshow parameters\nlog none\n"
+                f"cpd {plot_base}/png\nsetplot energy\nplot ldata res\nexit\n"
+            )
+        else:
+            # 默认 LM 模式
+            xcm_content = (
+                f"query yes\n{data_inputs_str}\nign bad\nign **-{emin}\nign {emax}-**\n"
+                f"statistic cstat\nmodel tbabs*apec\n"
+                f"{fit['nh']} -1\n{fit['kt']} 1 0.1 0.1 0.1 20 20\n{fit['abund']} -1\n{fit['redshift']} -1\n{fit['norm']} 1 0 0 0 1e10 1e10\n"
+                f"/*\nrenorm\nchatter 10\nlog {log_file}\nfit 100\nerror 2 5\nshow parameters\nlog none\n"
+                f"cpd {plot_base}/png\nsetplot energy\nplot ldata res\nexit\n"
+            )
         
         with open(xcm_file, 'w') as f: f.write(xcm_content)
             
@@ -265,25 +280,57 @@ def run_mapping():
     else:
         scale_map = fits.getdata("result/01_preparation/acb_scale_map.fits")
 
+    fit_method = GLOBAL_CFG["step4_fit"].get("fit_method", "lm").lower()
     logs = glob.glob(f"result/04_fitting/{method}_fit_result_*.log")
     for log_f in logs:
         region_id = os.path.basename(log_f).replace(f"{method}_fit_result_", "").replace(".log", "")
         kt, kt_err, norm = np.nan, np.nan, np.nan
-        with open(log_f, 'r', errors='ignore') as f:
-            for line in f:
-                if "apec" in line and "kT" in line and "keV" in line:
-                    match_err = re.search(r'keV\s+([0-9\.eE\-\+]+)\s+\+/-\s+([0-9\.eE\-\+]+)', line)
-                    if match_err: kt, kt_err = float(match_err.group(1)), float(match_err.group(2))
-                    else:
-                        match_val = re.search(r'keV\s+([0-9\.eE\-\+]+)', line)
-                        if match_val: kt = float(match_val.group(1))
-                if "apec" in line and "norm" in line:
-                    match_err = re.search(r'norm\s+([0-9\.Ee\-\+]+)\s+\+/-\s+([0-9\.Ee\-\+]+)', line)
-                    if match_err: norm = float(match_err.group(1))
-                    else:
-                        match_val = re.search(r'norm\s+([0-9\.Ee\-\+]+)', line)
-                        if match_val: norm = float(match_val.group(1))
-                        
+        kt_ci_err = np.nan  # 90% 置信区间误差
+
+        if fit_method == "mcmc":
+            # MCMC 模式：从 chain FITS 文件读取后验分布
+            chain_f = f"result/04_fitting/{method}_chain_{region_id}.fits"
+            if os.path.exists(chain_f):
+                try:
+                    chain_data = fits.getdata(chain_f)
+                    col_names = chain_data.columns.names
+                    # XSPEC chain 列名格式: 'kT__2', 'norm__5' (参数名__编号)
+                    # 兼容可能的 'p2', 'p5' 格式
+                    kt_col = None
+                    norm_col = None
+                    for c in col_names:
+                        if c.startswith('kT') or c == 'p2':
+                            kt_col = c
+                        elif c.startswith('norm') or c == 'p5':
+                            norm_col = c
+                    if kt_col is not None:
+                        kt_samples = chain_data[kt_col]
+                        kt = float(np.median(kt_samples))
+                        kt_ci_err = (np.percentile(kt_samples, 95) - np.percentile(kt_samples, 5)) / 2.0
+                    if norm_col is not None:
+                        norm_samples = chain_data[norm_col]
+                        norm = float(np.median(norm_samples))
+                except Exception as e:
+                    print(f"  Warning: failed to parse chain for {region_id}: {e}")
+        else:
+            # LM 模式：从日志解析
+            with open(log_f, 'r', errors='ignore') as f:
+                for line in f:
+                    if "apec" in line and "kT" in line and "keV" in line:
+                        match_err = re.search(r'keV\s+([0-9\.eE\-\+]+)\s+\+/-\s+([0-9\.eE\-\+]+)', line)
+                        if match_err: kt, kt_err = float(match_err.group(1)), float(match_err.group(2))
+                        else:
+                            match_val = re.search(r'keV\s+([0-9\.eE\-\+]+)', line)
+                            if match_val: kt = float(match_val.group(1))
+                    if "apec" in line and "norm" in line:
+                        match_err = re.search(r'norm\s+([0-9\.Ee\-\+]+)\s+\+/-\s+([0-9\.Ee\-\+]+)', line)
+                        if match_err: norm = float(match_err.group(1))
+                        else:
+                            match_val = re.search(r'norm\s+([0-9\.Ee\-\+]+)', line)
+                            if match_val: norm = float(match_val.group(1))
+        # LM 模式使用 1σ 协方差误差（参数表中的 +/- 值），不使用 90% CI
+        # error 2 5 命令仍会运行，但其输出不用于误差计算
+
         if not np.isnan(kt) and not np.isnan(norm) and norm > 0:
             if method in ["wvt", "contbin"]:
                 b_id = int(region_id)
@@ -331,15 +378,20 @@ def run_mapping():
 
 if __name__ == '__main__':
     GLOBAL_CFG = load_config()
-    data_directory = GLOBAL_CFG["base"].get("data_dir", "data")
-    
-    GLOBAL_OBS_LIST = auto_load_observations(data_directory)
-    print(f"Scan complete! Loaded {len(GLOBAL_OBS_LIST)} valid observation data blocks.")
-    
-    if len(GLOBAL_OBS_LIST) == 0:
-        print("CRITICAL ERROR: No valid data folders found!")
-        sys.exit(1)
-        
-    run_extraction()
-    run_fitting()
-    run_mapping()
+
+    if len(sys.argv) > 1 and sys.argv[1] == '--map-only':
+        print("[Map-only mode] Skipping extraction and fitting, regenerating maps from existing logs...")
+        run_mapping()
+    else:
+        data_directory = GLOBAL_CFG["base"].get("data_dir", "data")
+
+        GLOBAL_OBS_LIST = auto_load_observations(data_directory)
+        print(f"Scan complete! Loaded {len(GLOBAL_OBS_LIST)} valid observation data blocks.")
+
+        if len(GLOBAL_OBS_LIST) == 0:
+            print("CRITICAL ERROR: No valid data folders found!")
+            sys.exit(1)
+
+        run_extraction()
+        run_fitting()
+        run_mapping()

@@ -13,7 +13,7 @@
     "max_radius": 150.0
   },
   "step2": {
-    "downsample": 1000
+    "pixel_stride": 2
   },
   "step4_fit": {
     "nh": 0.0399, 
@@ -21,12 +21,13 @@
     "abund": 0.3,
     "redshift": 0.085,
     "norm": 1.0,
-    "energy_range": [0.7, 8.0]
+    "energy_range": [0.7, 8.0],
+    "fit_method": "mcmc"
   },
   "plot_mask": {
     "kt_min": 0.1,
     "kt_max": 20.0,
-    "max_err_kev": 5.0,
-    "mask_color": "#90EE90"
+    "max_err_kev": 7.0,
+    "mask_color": "#FFFFFF"
   }
 }
